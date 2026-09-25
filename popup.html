@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Jev Focus Guard</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main>
+    <header>
+      <div class="mark" aria-hidden="true">J</div>
+      <div><h1>Jev Focus Guard</h1><p id="statusLine">Checking connection…</p></div>
+      <label class="switch" title="Enable or pause"><input id="enabled" type="checkbox"><span></span></label>
+    </header>
+
+    <section id="keyCard" class="card key-card">
+      <label for="apiKey">Jev API key</label>
+      <div class="key-row"><input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="Paste for this Chrome session"><button id="saveKey">Connect</button></div>
+      <p>The key stays in Chrome's session-only extension storage and is cleared when Chrome closes.</p>
+    </section>
+
+    <section class="stats" aria-label="Lifetime statistics">
+      <div><strong id="removedCount">0</strong><span>removed</span></div>
+      <div><strong id="callCount">0</strong><span>Jev calls</span></div>
+      <div><strong id="latency">—</strong><span>last latency</span></div>
+    </section>
+
+    <section class="card controls">
+      <label>Blocking mode<select id="mode"><option value="ads_and_distractions">Ads + distractions</option><option value="ads_only">Ads only</option></select></label>
+      <label>Confidence<select id="confidence"><option value="0.6">More aggressive · 60%</option><option value="0.72">Balanced · 72%</option><option value="0.85">Conservative · 85%</option></select></label>
+      <label>Calls per page<select id="maxCalls"><option value="10">10</option><option value="20">20</option><option value="30">30</option><option value="50">50</option></select></label>
+      <label class="check"><input id="indicator" type="checkbox"> Show Jev decision indicator</label>
+    </section>
+
+    <section class="actions">
+      <button id="siteToggle" class="secondary">Allow this site</button>
+      <button id="undo" class="secondary">Undo last removal</button>
+      <button id="restoreAll" class="secondary">Restore this page</button>
+      <button id="exportLogs" class="secondary">Export diagnostics</button>
+      <button id="rescan" class="primary">Scan page now</button>
+    </section>
+
+    <p id="diagnosticStatus" class="diagnostic-status" aria-live="polite"></p>
+
+    <details class="card">
+      <summary>Last Jev decision</summary>
+      <dl>
+        <div><dt>Decision</dt><dd id="lastDecision">—</dd></div>
+        <div><dt>Confidence</dt><dd id="lastConfidence">—</dd></div>
+        <div><dt>Model</dt><dd id="lastModel">—</dd></div>
+      </dl>
+      <p id="lastError" class="error" hidden></p>
+    </details>
+    <footer><button id="clearKey" class="link">Forget API key</button><button id="clearLogs" class="link">Clear diagnostics</button><button id="resetStats" class="link">Reset stats</button></footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>
