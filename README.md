@@ -161,3 +161,7 @@ After changing or replacing files, return to `chrome://extensions` and click the
 The extension requests access to normal HTTP/HTTPS pages so its content script can inspect candidate element structure. It requests network access only to `https://api.typesafe.ai/*`. The service worker validates and reduces candidate descriptors before sending them. Page scripts cannot read the API key from extension session storage.
 
 Review the source before loading it, as you should with any unpacked extension.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
