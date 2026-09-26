@@ -25,6 +25,7 @@ Chrome does not allow extensions to modify internal pages such as `chrome://…`
 - Specifically detects sticky bottom banners, side-rail ad frames, viewport-dimming modals, email/newsletter capture popups, and floating or sticky video players.
 - Rechecks dynamic elements when their class, style, role, source, or modal state changes, plus periodic rescans during the first minute after page load.
 - Prioritizes strong candidates and reserves part of the per-page call budget for ads or overlays injected later.
+- Classifies up to four candidates in parallel, with a bounded queue so pages clear faster without an unbounded API burst.
 - Sends a privacy-reduced element descriptor to Jev.
 - Protects semantic recipe/article/main content and substantial in-flow reading sections even if they contain ad-like class names.
 - Hides the element only when Jev returns an allowed removal decision above your confidence threshold and the local primary-content safety check still passes.
@@ -132,17 +133,11 @@ The extension expects:
 
 Logs start only after this version is installed; the extension cannot recover decisions made by an older version. The export never includes the API key, cookies, form values, page text, or full URLs. It includes the page hostname, structural element metadata, local signals, Jev's choice/confidence/model, latency, policy settings, and whether the element was hidden, kept, protected, or restored.
 
-## GitHub-ready source
+## Source and license
 
-The unzipped folder is the complete source; no build step or dependencies are required. To put it in your own repository:
+The unzipped folder is the complete source; no build step or dependencies are required. The public repository is [tx-smitht/jev-focus-guard](https://github.com/tx-smitht/jev-focus-guard).
 
-```bash
-git init
-git add .
-git commit -m "Initial Jev Focus Guard extension"
-```
-
-Then create a private repository in your GitHub account and follow GitHub's displayed push instructions. Keeping it private is recommended because this is a personal developer-mode extension. Never commit an API key; this package contains none.
+Jev Focus Guard is available under the MIT License. Never commit an API key; this package contains none.
 
 ## Updating the local extension
 
@@ -161,7 +156,3 @@ After changing or replacing files, return to `chrome://extensions` and click the
 The extension requests access to normal HTTP/HTTPS pages so its content script can inspect candidate element structure. It requests network access only to `https://api.typesafe.ai/*`. The service worker validates and reduces candidate descriptors before sending them. Page scripts cannot read the API key from extension session storage.
 
 Review the source before loading it, as you should with any unpacked extension.
-
-## License
-
-MIT — see [LICENSE](LICENSE).

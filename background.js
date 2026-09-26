@@ -7,7 +7,11 @@ const DEFAULT_SETTINGS = {
   showIndicator: true,
   allowedHosts: [],
 };
-let requestChain = Promise.resolve();
+const MAX_PARALLEL_REQUESTS = 4;
+const classificationQueue = [];
+let activeRequestCount = 0;
+let statsMutationChain = Promise.resolve();
+let diagnosticMutationChain = Promise.resolve();
 const DIAGNOSTIC_SCHEMA = 1;
 const DIAGNOSTIC_LIMIT = 150;
 
@@ -29,7 +33,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     stats: { ...DEFAULT_STATS, ...(current.stats || {}) },
   });
   await chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
-  updateBadge(0, false);
+  updateBadge();
 });
 
 async function getSettings() {
@@ -42,10 +46,19 @@ async function getStats() {
   return { ...DEFAULT_STATS, ...(stats || {}) };
 }
 
-async function patchStats(patch) {
-  const next = { ...(await getStats()), ...patch };
-  await chrome.storage.local.set({ stats: next });
-  return next;
+function mutateStats(mutator) {
+  const job = statsMutationChain.then(async () => {
+    const current = await getStats();
+    const next = mutator(current);
+    await chrome.storage.local.set({ stats: next });
+    return next;
+  });
+  statsMutationChain = job.catch(() => undefined);
+  return job;
+}
+
+function patchStats(patch) {
+  return mutateStats((current) => ({ ...current, ...patch }));
 }
 
 async function getDiagnostics() {
@@ -53,19 +66,26 @@ async function getDiagnostics() {
   return Array.isArray(diagnostics) ? diagnostics.slice(-DIAGNOSTIC_LIMIT) : [];
 }
 
-async function appendDiagnostic(entry) {
-  const diagnostics = await getDiagnostics();
-  diagnostics.push(entry);
-  await chrome.storage.local.set({ diagnostics: diagnostics.slice(-DIAGNOSTIC_LIMIT) });
+function mutateDiagnostics(mutator) {
+  const job = diagnosticMutationChain.then(async () => {
+    const current = await getDiagnostics();
+    const next = mutator(current).slice(-DIAGNOSTIC_LIMIT);
+    await chrome.storage.local.set({ diagnostics: next });
+    return next;
+  });
+  diagnosticMutationChain = job.catch(() => undefined);
+  return job;
 }
 
-async function updateDiagnostic(requestId, patch) {
-  if (!requestId) return;
-  const diagnostics = await getDiagnostics();
-  const index = diagnostics.findIndex((entry) => entry.requestId === requestId);
-  if (index < 0) return;
-  diagnostics[index] = { ...diagnostics[index], ...patch };
-  await chrome.storage.local.set({ diagnostics });
+function appendDiagnostic(entry) {
+  return mutateDiagnostics((diagnostics) => [...diagnostics, entry]);
+}
+
+function updateDiagnostic(requestId, patch) {
+  if (!requestId) return Promise.resolve();
+  return mutateDiagnostics((diagnostics) => diagnostics.map((entry) =>
+    entry.requestId === requestId ? { ...entry, ...patch } : entry
+  ));
 }
 
 function newRequestId() {
@@ -77,9 +97,15 @@ async function hasApiKey() {
   return Boolean(jevApiKey);
 }
 
-function updateBadge(count, active) {
+function updateBadge(count = 0) {
+  const active = activeRequestCount > 0;
   chrome.action.setBadgeBackgroundColor({ color: active ? "#f59e0b" : "#334155" });
-  chrome.action.setBadgeText({ text: active ? "AI" : (count ? String(Math.min(count, 999)) : "") });
+  chrome.action.setBadgeText({ text: active ? String(Math.min(activeRequestCount, MAX_PARALLEL_REQUESTS)) : (count ? String(Math.min(count, 999)) : "") });
+}
+
+function setRequestActive(delta) {
+  activeRequestCount = Math.max(0, activeRequestCount + delta);
+  updateBadge();
 }
 
 function safeDescriptor(input) {
@@ -169,10 +195,12 @@ async function classify(rawCandidate) {
   const candidate = safeDescriptor(rawCandidate);
   const payload = buildPayload(candidate, settings.mode);
   const requestId = newRequestId();
-  const statsBefore = await getStats();
-  const callNumber = statsBefore.totalCalls + 1;
-  await patchStats({ totalCalls: callNumber, lastError: null });
-  updateBadge(0, true);
+  const statsAfterStart = await mutateStats((current) => ({
+    ...current,
+    totalCalls: current.totalCalls + 1,
+    lastError: null,
+  }));
+  const callNumber = statsAfterStart.totalCalls;
   const startedAt = performance.now();
   try {
     const response = await fetch(API_URL, {
@@ -220,8 +248,12 @@ async function classify(rawCandidate) {
     return { ok: true, ...parsed, shouldRemove, latencyMs, callNumber, requestId };
   } catch (error) {
     const latencyMs = Math.round(performance.now() - startedAt);
-    const current = await getStats();
-    await patchStats({ failedCalls: current.failedCalls + 1, lastLatencyMs: latencyMs, lastError: error.message });
+    await mutateStats((current) => ({
+      ...current,
+      failedCalls: current.failedCalls + 1,
+      lastLatencyMs: latencyMs,
+      lastError: error.message,
+    }));
     await appendDiagnostic({
       requestId,
       timestamp: new Date().toISOString(),
@@ -234,14 +266,25 @@ async function classify(rawCandidate) {
       error: String(error.message || "Jev request failed").slice(0, 300),
     });
     return { ok: false, error: error.message, latencyMs, callNumber, requestId };
-  } finally {
-    updateBadge(0, false);
   }
 }
+
+function pumpClassificationQueue() {
+  while (activeRequestCount < MAX_PARALLEL_REQUESTS && classificationQueue.length) {
+    const { candidate, resolve, reject } = classificationQueue.shift();
+    setRequestActive(1);
+    classify(candidate).then(resolve, reject).finally(() => {
+      setRequestActive(-1);
+      pumpClassificationQueue();
+    });
+  }
+}
+
 function queueClassification(candidate) {
-  const job = requestChain.then(() => classify(candidate));
-  requestChain = job.catch(() => undefined);
-  return job;
+  return new Promise((resolve, reject) => {
+    classificationQueue.push({ candidate, resolve, reject });
+    pumpClassificationQueue();
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -285,12 +328,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case "RECORD_REMOVED": {
-        const stats = await getStats();
-        const totalRemoved = stats.totalRemoved + 1;
-        await patchStats({ totalRemoved });
+        const stats = await mutateStats((current) => ({
+          ...current,
+          totalRemoved: current.totalRemoved + 1,
+        }));
         await updateDiagnostic(message.requestId, { action: "hidden_on_page" });
-        updateBadge(totalRemoved, false);
-        sendResponse({ ok: true, totalRemoved });
+        updateBadge(stats.totalRemoved);
+        sendResponse({ ok: true, totalRemoved: stats.totalRemoved });
         break;
       }
       case "RECORD_ACTION": {
@@ -317,12 +361,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case "CLEAR_DIAGNOSTICS":
-        await chrome.storage.local.set({ diagnostics: [] });
+        await mutateDiagnostics(() => []);
         sendResponse({ ok: true });
         break;
       case "RESET_STATS":
-        await chrome.storage.local.set({ stats: { ...DEFAULT_STATS } });
-        updateBadge(0, false);
+        await mutateStats(() => ({ ...DEFAULT_STATS }));
+        updateBadge();
         sendResponse({ ok: true });
         break;
       default:

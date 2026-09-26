@@ -18,6 +18,7 @@
   const AD_WORDS = new Set(["ad", "ads", "advert", "advertisement", "advertising", "adslot", "adunit", "sponsor", "sponsored", "promo", "promoted", "dfp", "prebid", "taboola", "outbrain", "mediavine", "raptive", "adthrive", "playwire", "primis", "conatix"]);
   const DISTRACTION_WORDS = new Set(["newsletter", "subscribe", "signup", "sign-up", "modal", "popup", "overlay", "floating", "floater", "sticky", "dock", "docked", "pip"]);
   const MEDIA_WORDS = new Set(["video", "player", "autoplay", "media", "vpaid", "vast"]);
+  const MAX_PARALLEL_CLASSIFICATIONS = 4;
 
   function message(payload) {
     return new Promise((resolve) => {
@@ -262,18 +263,16 @@
     if (!deferRun) runQueue();
   }
 
-  async function runQueue() {
-    if (state.running) return;
-    state.running = true;
+  async function classifyNext() {
     while (state.queue.length) {
       const item = state.queue.shift();
       state.queued.delete(item.element);
       if (!item.element.isConnected || !visible(item.element)) continue;
-      if (!state.settings?.enabled || !state.keyPresent || state.settings.allowedHosts?.includes(location.hostname)) break;
+      if (!state.settings?.enabled || !state.keyPresent || state.settings.allowedHosts?.includes(location.hostname)) return;
       if (state.callsThisPage >= state.settings.maxCallsPerPage) {
         item.element.dataset.jevfgState = "limit";
         showHud("kept", `Jev call limit reached (${state.settings.maxCallsPerPage})`);
-        break;
+        return;
       }
       const reservedCalls = Math.min(5, Math.max(1, Math.floor(state.settings.maxCallsPerPage / 5)));
       if (item.priority < 4 && state.callsThisPage >= state.settings.maxCallsPerPage - reservedCalls) {
@@ -282,12 +281,12 @@
       }
       state.callsThisPage += 1;
       item.element.dataset.jevfgState = "calling";
-      showHud("calling", `Calling Jev · decision ${state.callsThisPage}`);
+      showHud("calling", `Calling Jev · up to ${MAX_PARALLEL_CLASSIFICATIONS} at once · decision ${state.callsThisPage}`);
       const result = await message({ type: "CLASSIFY", candidate: item.descriptor });
       if (!result?.ok) {
         item.element.dataset.jevfgState = "error";
         showHud("error", result?.error || "Jev call failed");
-        if (result?.needsKey) break;
+        if (result?.needsKey) return;
       } else if (result.shouldRemove) {
         state.evaluated.set(item.element, item.signature);
         const currentInfo = localSignals(item.element);
@@ -304,9 +303,21 @@
         item.element.dataset.jevfgState = "kept";
         showHud("kept", `Jev kept it · ${Math.round(result.confidence * 100)}% · call #${result.callNumber}`);
       }
-      await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    state.running = false;
+  }
+
+  async function runQueue() {
+    if (state.running) return;
+    state.running = true;
+    try {
+      await Promise.all(Array.from(
+        { length: MAX_PARALLEL_CLASSIFICATIONS },
+        () => classifyNext(),
+      ));
+    } finally {
+      state.running = false;
+      if (state.queue.length) runQueue();
+    }
   }
 
   function scan(root = document) {
