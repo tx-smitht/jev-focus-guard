@@ -39,6 +39,60 @@
     return tokens.some((token) => AD_WORDS.has(token) || /^(?:ad|ads)(?:slot|unit|wrap|wrapper|container|banner|rail|box|zone|space|holder|placement|server)?$/.test(token));
   }
 
+  // Deterministic high-confidence ad containers: hide without spending a Jev call.
+  // Narrowly scoped to publisher ad-platform wrappers so site footers and sticky UI are untouched.
+  function hasStrongAdIdentity(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const id = element.id || "";
+    if (/^AdThrive_/i.test(id)) return true;
+    if (/^div-gpt-ad/i.test(id)) return true;
+    if (/^google_ads/i.test(id)) return true;
+    const className = typeof element.className === "string" ? element.className : "";
+    if (/\badthrive-ad\b/i.test(className)) return true;
+    try {
+      if (element.matches('[data-ad], [data-ad-slot], [data-ad-client], [data-google-query-id], [data-adunit], [data-ad-unit], .adsbygoogle')) return true;
+    } catch { /* ignore selector errors */ }
+    return false;
+  }
+
+  function isDeterministicAdContainer(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.closest("#jev-focus-guard-hud")) return false;
+    if (!hasStrongAdIdentity(element)) return false;
+    const info = localSignals(element);
+    if (primaryContentSignals(element, info).length) return false;
+    const hasAdContent = element.matches("iframe, embed, object, video") ||
+      Boolean(element.querySelector("iframe, embed, object, video, [aria-label*='advertisement' i]")) ||
+      info.signals.includes("ad_identity_token") ||
+      info.signals.includes("ad_data_attribute");
+    return hasAdContent;
+  }
+
+  // Promote an inner ad node (e.g. an iframe) to its actionable ad wrapper,
+  // e.g. #AdThrive_Footer_1_desktop.adthrive-sticky.adthrive-footer.
+  function actionableContainer(element) {
+    let node = element;
+    let chosen = element;
+    for (let depth = 0; depth < 6; depth++) {
+      const parent = node.parentElement;
+      if (!parent || parent === document.body || parent === document.documentElement) break;
+      let info;
+      try { info = localSignals(parent); } catch { break; }
+      if (primaryContentSignals(parent, info).length) break;
+      const strong = hasStrongAdIdentity(parent);
+      const tokens = [...info.idTokens, ...info.classTokens, ...info.ariaTokens];
+      const adTokens = hasAdToken(tokens);
+      const overlay = info.style.position === "fixed" || info.style.position === "sticky";
+      if (strong || (adTokens && overlay)) {
+        try { if (visible(parent)) chosen = parent; } catch { /* ignore */ }
+        node = parent;
+        continue;
+      }
+      break;
+    }
+    return chosen;
+  }
+
   function resourceHosts(element) {
     const hosts = [];
     const nodes = element.matches("iframe[src], video[src], source[src], embed[src]")
@@ -181,7 +235,7 @@
   }
 
   if (globalThis.__JEVFG_TEST_MODE__) {
-    globalThis.__JEVFG_TEST_HOOKS__ = { localSignals, primaryContentSignals, describe };
+    globalThis.__JEVFG_TEST_HOOKS__ = { localSignals, primaryContentSignals, describe, hasStrongAdIdentity, isDeterministicAdContainer, actionableContainer, hasAdToken, visible };
     return;
   }
 
@@ -207,14 +261,19 @@
       element,
       style: element.getAttribute("style"),
       ariaHidden: element.getAttribute("aria-hidden"),
+      hadHiddenClass: element.classList.contains("jevfg-hidden"),
       requestId: result.requestId,
     };
     state.hidden.push(record);
     element.dataset.jevfgState = "hidden";
+    element.classList.add("jevfg-hidden");
     element.style.setProperty("display", "none", "important");
+    element.style.setProperty("visibility", "hidden", "important");
     element.setAttribute("aria-hidden", "true");
     message({ type: "RECORD_REMOVED", requestId: result.requestId });
-    showHud("removed", `Jev removed ${result.choice === "remove_ad" ? "an ad" : "a distraction"} · ${Math.round(result.confidence * 100)}% · call #${result.callNumber}`);
+    const label = result.deterministic ? "Deterministic ad block" : `Jev removed ${result.choice === "remove_ad" ? "an ad" : "a distraction"}`;
+    const confidence = result.deterministic ? "" : ` · ${Math.round(result.confidence * 100)}%`;
+    showHud("removed", `${label}${confidence} · call #${result.callNumber}`);
   }
 
   function restoreLast() {
@@ -222,6 +281,7 @@
     if (!record?.element?.isConnected) return false;
     if (record.style === null) record.element.removeAttribute("style");
     else record.element.setAttribute("style", record.style);
+    if (!record.hadHiddenClass) record.element.classList.remove("jevfg-hidden");
     if (record.ariaHidden === null) record.element.removeAttribute("aria-hidden");
     else record.element.setAttribute("aria-hidden", record.ariaHidden);
     record.element.dataset.jevfgState = "restored";
@@ -244,8 +304,35 @@
   }
 
   function enqueue(element, deferRun = false) {
+    if (!(element instanceof HTMLElement)) return;
     if (state.queued.has(element) || element.closest("#jev-focus-guard-hud")) return;
-    if (!visible(element) || element.dataset.jevfgState === "hidden" || element.dataset.jevfgState === "calling") return;
+    if (element.dataset.jevfgState === "hidden" || element.dataset.jevfgState === "calling") return;
+    // Promote inner ad nodes (iframes) to their actionable ad wrapper before any visibility check,
+    // so a late-loading iframe still hides its fixed/sticky footer container.
+    let target = element;
+    try { target = actionableContainer(element) || element; } catch { target = element; }
+    if (target !== element) {
+      if (state.queued.has(target) || target.closest("#jev-focus-guard-hud")) return;
+      if (target.dataset.jevfgState === "hidden" || target.dataset.jevfgState === "calling") return;
+      element = target;
+    }
+    if (!visible(element)) return;
+    // Deterministic fast path: obvious ad-platform wrappers never spend a Jev call.
+    try {
+      if (isDeterministicAdContainer(element)) {
+        const fastInfo = localSignals(element);
+        const fastDescriptor = describe(element, fastInfo);
+        state.evaluated.set(element, descriptorSignature(fastDescriptor));
+        hideElement(element, {
+          requestId: `deterministic-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          choice: "remove_ad",
+          confidence: 1,
+          callNumber: state.callsThisPage,
+          deterministic: true,
+        });
+        return;
+      }
+    } catch { /* fall through to heuristic path */ }
     const info = localSignals(element);
     if (info.score < 2) return;
     const descriptor = describe(element, info);
@@ -270,9 +357,24 @@
       if (!item.element.isConnected || !visible(item.element)) continue;
       if (!state.settings?.enabled || !state.keyPresent || state.settings.allowedHosts?.includes(location.hostname)) return;
       if (state.callsThisPage >= state.settings.maxCallsPerPage) {
+        // Post-limit fallback: obvious ad-platform wrappers are still hidden deterministically.
+        try {
+          if (isDeterministicAdContainer(item.element)) {
+            const fallbackInfo = localSignals(item.element);
+            state.evaluated.set(item.element, descriptorSignature(describe(item.element, fallbackInfo)));
+            hideElement(item.element, {
+              requestId: `deterministic-limit-${Date.now().toString(36)}`,
+              choice: "remove_ad",
+              confidence: 1,
+              callNumber: state.callsThisPage,
+              deterministic: true,
+            });
+            continue;
+          }
+        } catch { /* fall through to limit label */ }
         item.element.dataset.jevfgState = "limit";
         showHud("kept", `Jev call limit reached (${state.settings.maxCallsPerPage})`);
-        return;
+        continue;
       }
       const reservedCalls = Math.min(5, Math.max(1, Math.floor(state.settings.maxCallsPerPage / 5)));
       if (item.priority < 4 && state.callsThisPage >= state.settings.maxCallsPerPage - reservedCalls) {
@@ -341,8 +443,19 @@
       const roots = [];
       for (const mutation of mutations) {
         if (mutation.type === "attributes") {
-          roots.push(mutation.target);
-          if (mutation.target.parentElement) roots.push(mutation.target.parentElement);
+          const target = mutation.target;
+          // Publisher scripts (e.g. Raptive/GumGum) sometimes rewrite inline style on the
+          // footer wrapper; re-assert our hiding if they tamper with a hidden ad container.
+          if (target instanceof HTMLElement && target.dataset.jevfgState === "hidden") {
+            if (!target.classList.contains("jevfg-hidden")) target.classList.add("jevfg-hidden");
+            try {
+              target.style.setProperty("display", "none", "important");
+              target.style.setProperty("visibility", "hidden", "important");
+            } catch { /* ignore */ }
+            continue;
+          }
+          roots.push(target);
+          if (target.parentElement) roots.push(target.parentElement);
         }
         for (const node of mutation.addedNodes || []) if (node instanceof Element) roots.push(node);
       }

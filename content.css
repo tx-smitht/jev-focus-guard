@@ -33,3 +33,15 @@
 @media (prefers-reduced-motion: reduce) {
   #jev-focus-guard-hud { transition: none !important; animation: none !important; }
 }
+
+/* Deterministic ad hiding: survives publisher scripts rewriting inline style. */
+.jevfg-hidden {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+}
